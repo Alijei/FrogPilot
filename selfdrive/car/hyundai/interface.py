@@ -29,32 +29,24 @@ class CarInterface(CarInterfaceBase):
     ret.carName = "hyundai"
     ret.radarUnavailable = RADAR_START_ADDR not in fingerprint[1] or DBC[ret.carFingerprint]["radar"] is None
 
-    # These cars have been put into dashcam only due to both a lack of users and test coverage.
-    # These cars likely still work fine. Once a user confirms each car works and a test route is
-    # added to selfdrive/car/tests/routes.py, we can remove it from this list.
-    # FIXME: the Optima Hybrid 2017 uses a different SCC12 checksum
     ret.dashcamOnly = candidate in {CAR.KIA_OPTIMA_H, }
 
     hda2 = Ecu.adas in [fw.ecu for fw in car_fw]
     CAN = CanBus(None, hda2, fingerprint)
 
     if candidate in CANFD_CAR:
-      # detect if car is hybrid
       if 0x105 in fingerprint[CAN.ECAN]:
         ret.flags |= HyundaiFlags.HYBRID.value
       elif candidate in EV_CAR:
         ret.flags |= HyundaiFlags.EV.value
 
-      # detect HDA2 with ADAS Driving ECU
       if hda2:
         ret.flags |= HyundaiFlags.CANFD_HDA2.value
         if 0x110 in fingerprint[CAN.CAM]:
           ret.flags |= HyundaiFlags.CANFD_HDA2_ALT_STEERING.value
       else:
-        # non-HDA2
         if 0x1cf not in fingerprint[CAN.ECAN]:
           ret.flags |= HyundaiFlags.CANFD_ALT_BUTTONS.value
-        # ICE cars do not have 0x130; GEARS message on 0x40 or 0x70 instead
         if 0x130 not in fingerprint[CAN.ECAN]:
           if 0x40 not in fingerprint[CAN.ECAN]:
             ret.flags |= HyundaiFlags.CANFD_ALT_GEARS_2.value
@@ -63,67 +55,69 @@ class CarInterface(CarInterfaceBase):
         if candidate not in CANFD_RADAR_SCC_CAR:
           ret.flags |= HyundaiFlags.CANFD_CAMERA_SCC.value
     else:
-      # TODO: detect EV and hybrid
       if candidate in HYBRID_CAR:
         ret.flags |= HyundaiFlags.HYBRID.value
       elif candidate in EV_CAR:
         ret.flags |= HyundaiFlags.EV.value
 
-      # Send LFA message on cars with HDA
       if 0x485 in fingerprint[2]:
         ret.flags |= HyundaiFlags.SEND_LFA.value
 
-      # These cars use the FCA11 message for the AEB and FCW signals, all others use SCC12
       if 0x38d in fingerprint[0] or 0x38d in fingerprint[2]:
         ret.flags |= HyundaiFlags.USE_FCA.value
 
       if 0x53E in fingerprint[2]:
         ret.flags |= HyundaiFlags.LKAS12.value
 
-    ret.steerActuatorDelay = 0.1  # Default delay
+    ret.steerActuatorDelay = 0.1
     ret.steerLimitTimer = 0.4
     CarInterfaceBase.configure_torque_tune(candidate, ret.lateralTuning)
 
     if candidate == CAR.KIA_OPTIMA_G4_FL:
       ret.steerActuatorDelay = 0.2
 
-    # *** longitudinal control ***
-    if candidate in CANFD_CAR:
-      if not use_new_api:
-        ret.longitudinalTuning.deadzoneBP = [0.]
-        ret.longitudinalTuning.deadzoneV = [0.]
-        ret.longitudinalTuning.kpV = [0.1]
-        ret.longitudinalTuning.kiV = [0.0]
-      ret.experimentalLongitudinalAvailable = candidate not in (CANFD_UNSUPPORTED_LONGITUDINAL_CAR | CANFD_RADAR_SCC_CAR)
-    else:
-      if not use_new_api:
+    elif candidate == CAR.HYUNDAI_TUCSON_4TH_GEN:
+        ret.carName = "hyundai"
+        ret.safetyModel = car.CarParams.SafetyModel.hyundai
+
+        ret.openpilotLongitudinalControl = False
+        ret.sccAvailable = False
+
+        ret.steerRatio = 13.7
+        ret.steerActuatorDelay = 0.2
+        ret.steerRateCost = 1.0
+        ret.steerLimitTimer = 0.8
+
+        ret.flags |= HyundaiFlags.USE_FCA.value
+
+        if 0x485 in fingerprint[2]:
+            ret.flags |= HyundaiFlags.SEND_LFA.value
+
+    if candidate != CAR.HYUNDAI_TUCSON_4TH_GEN:
+        ret.openpilotLongitudinalControl = experimental_long and ret.experimentalLongitudinalAvailable
+
+    if candidate != CAR.HYUNDAI_TUCSON_4TH_GEN:
         ret.longitudinalTuning.deadzoneBP = [0.]
         ret.longitudinalTuning.deadzoneV = [0.]
         ret.longitudinalTuning.kpV = [0.5]
         ret.longitudinalTuning.kiV = [0.0]
-      ret.experimentalLongitudinalAvailable = candidate not in (UNSUPPORTED_LONGITUDINAL_CAR | CAMERA_SCC_CAR)
-    ret.openpilotLongitudinalControl = experimental_long and ret.experimentalLongitudinalAvailable
-    ret.pcmCruise = not ret.openpilotLongitudinalControl
 
+    ret.pcmCruise = not ret.openpilotLongitudinalControl
     ret.stoppingControl = True
     ret.startingState = True
     ret.vEgoStarting = 0.1
     ret.startAccel = 1.0
     ret.longitudinalActuatorDelay = 0.5
 
-    # *** feature detection ***
     if candidate in CANFD_CAR:
       ret.enableBsm = 0x1e5 in fingerprint[CAN.ECAN]
-
       if 0x1fa in fingerprint[CAN.ECAN]:
         ret.flags |= HyundaiFlags.NAV_MSG.value
     else:
       ret.enableBsm = 0x58b in fingerprint[0]
-
       if 0x544 in fingerprint[0]:
         ret.flags |= HyundaiFlags.NAV_MSG.value
 
-    # *** panda safety config ***
     if candidate in CANFD_CAR:
       cfgs = [get_safety_config(car.CarParams.SafetyModel.hyundaiCanfd), ]
       if CAN.ECAN >= 4:
@@ -132,40 +126,17 @@ class CarInterface(CarInterfaceBase):
 
       if ret.flags & HyundaiFlags.CANFD_HDA2:
         ret.safetyConfigs[-1].safetyParam |= Panda.FLAG_HYUNDAI_CANFD_HDA2
-        if ret.flags & HyundaiFlags.CANFD_HDA2_ALT_STEERING:
-          ret.safetyConfigs[-1].safetyParam |= Panda.FLAG_HYUNDAI_CANFD_HDA2_ALT_STEERING
       if ret.flags & HyundaiFlags.CANFD_ALT_BUTTONS:
         ret.safetyConfigs[-1].safetyParam |= Panda.FLAG_HYUNDAI_CANFD_ALT_BUTTONS
       if ret.flags & HyundaiFlags.CANFD_CAMERA_SCC:
         ret.safetyConfigs[-1].safetyParam |= Panda.FLAG_HYUNDAI_CAMERA_SCC
     else:
       if candidate in LEGACY_SAFETY_MODE_CAR:
-        # these cars require a special panda safety mode due to missing counters and checksums in the messages
         ret.safetyConfigs = [get_safety_config(car.CarParams.SafetyModel.hyundaiLegacy)]
       else:
         ret.safetyConfigs = [get_safety_config(car.CarParams.SafetyModel.hyundai, 0)]
 
-      if candidate in CAMERA_SCC_CAR:
-        ret.safetyConfigs[0].safetyParam |= Panda.FLAG_HYUNDAI_CAMERA_SCC
-
-      if 0x391 in fingerprint[0]:
-        ret.flags |= HyundaiFlags.CAN_LFA_BTN.value
-        ret.safetyConfigs[0].safetyParam |= Panda.FLAG_HYUNDAI_LFA_BTN
-
-    if ret.openpilotLongitudinalControl:
-      ret.safetyConfigs[-1].safetyParam |= Panda.FLAG_HYUNDAI_LONG
-    if ret.flags & HyundaiFlags.HYBRID:
-      ret.safetyConfigs[-1].safetyParam |= Panda.FLAG_HYUNDAI_HYBRID_GAS
-    elif ret.flags & HyundaiFlags.EV:
-      ret.safetyConfigs[-1].safetyParam |= Panda.FLAG_HYUNDAI_EV_GAS
-
-    if candidate in (CAR.HYUNDAI_KONA, CAR.HYUNDAI_KONA_EV, CAR.HYUNDAI_KONA_HEV, CAR.HYUNDAI_KONA_EV_2022):
-      ret.flags |= HyundaiFlags.ALT_LIMITS.value
-      ret.safetyConfigs[-1].safetyParam |= Panda.FLAG_HYUNDAI_ALT_LIMITS
-
     ret.centerToFront = ret.wheelbase * 0.4
-
-    # Detect smartMDPS
     if 0x2AA in fingerprint[0]:
       ret.minSteerSpeed = 0.
 
@@ -179,36 +150,10 @@ class CarInterface(CarInterfaceBase):
         addr, bus = 0x730, CanBus(CP).ECAN
       disable_ecu(logcan, sendcan, bus=bus, addr=addr, com_cont_req=b'\x28\x83\x01')
 
-    # for blinkers
     if CP.flags & HyundaiFlags.ENABLE_BLINKERS:
       disable_ecu(logcan, sendcan, bus=CanBus(CP).ECAN, addr=0x7B1, com_cont_req=b'\x28\x83\x01')
 
   def _update(self, c, frogpilot_toggles):
     ret, fp_ret = self.CS.update(self.cp, self.cp_cam, frogpilot_toggles)
-
-    if self.CS.CP.openpilotLongitudinalControl:
-      ret.buttonEvents = [
-        *create_button_events(self.CS.cruise_buttons[-1], self.CS.prev_cruise_buttons, BUTTONS_DICT),
-        *create_button_events(self.CS.lkas_enabled, self.CS.lkas_previously_enabled, {1: FrogPilotButtonType.lkas}),
-      ]
-    else:
-      ret.buttonEvents = create_button_events(self.CS.lkas_enabled, self.CS.lkas_previously_enabled, {1: FrogPilotButtonType.lkas})
-
-    # On some newer model years, the CANCEL button acts as a pause/resume button based on the PCM state
-    # To avoid re-engaging when openpilot cancels, check user engagement intention via buttons
-    # Main button also can trigger an engagement on these cars
-    allow_enable = any(btn in ENABLE_BUTTONS for btn in self.CS.cruise_buttons) or any(self.CS.main_buttons)
-    events = self.create_common_events(ret, extra_gears=[GearShifter.sport, GearShifter.manumatic],
-                                       pcm_enable=self.CS.CP.pcmCruise, allow_enable=allow_enable)
-
-    # low speed steer alert hysteresis logic (only for cars with steer cut off above 10 m/s)
-    if ret.vEgo < (self.CP.minSteerSpeed + 2.) and self.CP.minSteerSpeed > 10.:
-      self.low_speed_alert = True
-    if ret.vEgo > (self.CP.minSteerSpeed + 4.):
-      self.low_speed_alert = False
-    if self.low_speed_alert:
-      events.add(car.CarEvent.EventName.belowSteerSpeed)
-
-    ret.events = events.to_msg()
-
+    ret.events = self.create_common_events(ret).to_msg()
     return ret, fp_ret
